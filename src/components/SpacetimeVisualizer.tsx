@@ -57,6 +57,19 @@ export default function SpacetimeVisualizer() {
   const targetYRef = useRef<Float32Array | null>(null);
   const targetColorsRef = useRef<Float32Array | null>(null);
 
+  // Add refs to manage geodesics and sampling field
+  const geodesicsRef = useRef<Array<THREE.Line>>(new Array<THREE.Line>());
+  const gridDivisionsRef = useRef<number>(64);
+  const fieldRef = useRef<{
+    values: Float32Array; // centered potential per vertex (before scaling)
+    nx: number; // divisions+1 in x
+    nz: number; // divisions+1 in z
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  } | null>(null);
+
   // Initialize Three.js scene
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -84,6 +97,7 @@ export default function SpacetimeVisualizer() {
     // Create spacetime grid (as a deformable plane wireframe)
     const gridSize = 20;
     const gridDivisions = 64; // reduced for performance
+    gridDivisionsRef.current = gridDivisions; // track divisions for field sampling
     const planeGeom = new THREE.PlaneGeometry(gridSize * 2, gridSize * 2, gridDivisions, gridDivisions);
     // Rotate into XZ plane so Y is "depth" for curvature
     planeGeom.rotateX(-Math.PI / 2);
@@ -290,6 +304,102 @@ export default function SpacetimeVisualizer() {
     };
   }, []);
 
+  // Helper: recompute geodesic lines from current field
+  const recomputeGeodesics = useCallback(() => {
+    // Remove old geodesics
+    if (sceneRef.current && geodesicsRef.current.length) {
+      for (const line of geodesicsRef.current) {
+        sceneRef.current.remove(line);
+      }
+    }
+    geodesicsRef.current = [];
+
+    if (!showGeodesics) return;
+    if (!sceneRef.current) return;
+    if (!fieldRef.current) return;
+
+    const { values, nx, nz, minX, maxX, minZ, maxZ } = fieldRef.current;
+
+    // Bilinear sampling of potential
+    const samplePotential = (x: number, z: number) => {
+      const u = (x - minX) / (maxX - minX) * (nx - 1);
+      const v = (z - minZ) / (maxZ - minZ) * (nz - 1);
+      const iu = Math.max(0, Math.min(nx - 2, Math.floor(u)));
+      const iv = Math.max(0, Math.min(nz - 2, Math.floor(v)));
+      const fu = u - iu;
+      const fv = v - iv;
+
+      const idx = (ii: number, jj: number) => jj * nx + ii;
+
+      const v00 = values[idx(iu, iv)];
+      const v10 = values[idx(iu + 1, iv)];
+      const v01 = values[idx(iu, iv + 1)];
+      const v11 = values[idx(iu + 1, iv + 1)];
+
+      const v0 = v00 * (1 - fu) + v10 * fu;
+      const v1 = v01 * (1 - fu) + v11 * fu;
+      return v0 * (1 - fv) + v1 * fv;
+    };
+
+    // Numerical gradient via central differences
+    const grad = (x: number, z: number) => {
+      const eps = Math.max((maxX - minX) / (nx - 1), (maxZ - minZ) / (nz - 1)) * 0.75;
+      const dVdx = (samplePotential(x + eps, z) - samplePotential(x - eps, z)) / (2 * eps);
+      const dVdz = (samplePotential(x, z + eps) - samplePotential(x, z - eps)) / (2 * eps);
+      return new THREE.Vector2(dVdx, dVdz);
+    };
+
+    // Trace a handful of rays across the sheet
+    const startX = minX;
+    const rayCount: number = 8;
+    const stepCount = 140;
+    const stepSize = (maxX - minX) / 60;
+    const bendStrength = 0.04; // how strongly rays bend toward gradient
+
+    for (let r = 0; r < rayCount; r++) {
+      const t = rayCount === 1 ? 0.5 : r / (rayCount - 1);
+      const startZ = minZ * (1 - t) + maxZ * t;
+
+      // Initial direction along +X
+      let dir = new THREE.Vector2(1, 0).normalize();
+      let x = startX;
+      let z = startZ;
+
+      const points: THREE.Vector3[] = [];
+      points.push(new THREE.Vector3(x, 0, z));
+
+      for (let i = 0; i < stepCount; i++) {
+        // Bend slightly in the -grad direction (geodesic/light bending heuristic)
+        const g = grad(x, z);
+        // Attractive bending toward higher curvature magnitude; use -grad
+        dir = new THREE.Vector2(dir.x, dir.y)
+          .addScaledVector(g.multiplyScalar(-1), bendStrength)
+          .normalize();
+
+        x += dir.x * stepSize;
+        z += dir.y * stepSize;
+
+        // Stop if out of bounds
+        if (x < minX || x > maxX || z < minZ || z > maxZ) break;
+
+        points.push(new THREE.Vector3(x, 0, z));
+      }
+
+      if (points.length > 1) {
+        const geom = new THREE.BufferGeometry().setFromPoints(points);
+        const mat = new THREE.LineBasicMaterial({
+          color: 0xffe27a,
+          transparent: true,
+          opacity: 0.9,
+        });
+        const line = new THREE.Line(geom, mat);
+        line.renderOrder = 2; // above heatmap
+        sceneRef.current.add(line);
+        geodesicsRef.current.push(line);
+      }
+    }
+  }, [showGeodesics]);
+
   // Update objects in scene
   useEffect(() => {
     if (!sceneRef.current) return;
@@ -460,7 +570,30 @@ export default function SpacetimeVisualizer() {
     colors.needsUpdate = true;
     positions.needsUpdate = true;
     geometry.computeBoundingSphere();
-  }, [objects, selectedObject?._id, selectedObject?.mass]);
+
+    // Update sampling field for geodesics
+    const gridSize = gridExtentRef.current; // half extent
+    const divisions = gridDivisionsRef.current;
+    const nx = divisions + 1;
+    const nz = divisions + 1;
+    // Store centered potential (pre-scaling)
+    const fieldValues = new Float32Array(positions.count);
+    for (let i = 0; i < positions.count; i++) {
+      fieldValues[i] = disps[i] - meanDisp;
+    }
+    fieldRef.current = {
+      values: fieldValues,
+      nx,
+      nz,
+      minX: -gridSize,
+      maxX: gridSize,
+      minZ: -gridSize,
+      maxZ: gridSize,
+    };
+
+    // Rebuild geodesics whenever curvature changes
+    recomputeGeodesics();
+  }, [objects, selectedObject?._id, selectedObject?.mass, recomputeGeodesics]);
 
   // Debounce timer for mass updates
   const massUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -545,6 +678,23 @@ export default function SpacetimeVisualizer() {
       toast.error("Failed to clear objects");
     }
   }, [clearAllObjects]);
+
+  // Recompute or remove geodesics on toggle
+  useEffect(() => {
+    if (!sceneRef.current) return;
+    if (!showGeodesics) {
+      // Remove existing lines
+      if (geodesicsRef.current.length) {
+        for (const line of geodesicsRef.current) {
+          sceneRef.current.remove(line);
+        }
+        geodesicsRef.current = [];
+      }
+      return;
+    }
+    // Build when toggled on
+    recomputeGeodesics();
+  }, [showGeodesics, recomputeGeodesics]);
 
   if (!user) {
     return (
