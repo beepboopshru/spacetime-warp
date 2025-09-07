@@ -53,6 +53,9 @@ export default function SpacetimeVisualizer() {
 
   // Store original plane positions to reset before recomputing curvature
   const basePositionsRef = useRef<Float32Array | null>(null);
+  // Targets for smooth animation of curvature (Y positions + colors)
+  const targetYRef = useRef<Float32Array | null>(null);
+  const targetColorsRef = useRef<Float32Array | null>(null);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -243,9 +246,50 @@ export default function SpacetimeVisualizer() {
     window.addEventListener('resize', handleResize);
     handleResize();
 
-    // Animation loop
+    // Animation loop with smooth interpolation towards target curvature
     const animate = () => {
       requestAnimationFrame(animate);
+
+      // Smoothly interpolate grid Y positions and vertex colors to targets
+      const grid = gridRef.current;
+      if (grid) {
+        const geom = grid.geometry;
+        const pos = geom.attributes.position as THREE.BufferAttribute;
+        const colorsAttr = geom.getAttribute("color") as THREE.BufferAttribute | undefined;
+
+        const targetY = targetYRef.current;
+        const targetColors = targetColorsRef.current;
+
+        // Interpolation factor (0..1), higher is faster
+        const alpha = 0.12;
+
+        if (targetY && pos && pos.count === targetY.length) {
+          for (let i = 0; i < pos.count; i++) {
+            const curY = pos.getY(i);
+            const tgtY = targetY[i];
+            pos.setY(i, curY + (tgtY - curY) * alpha);
+          }
+          pos.needsUpdate = true;
+          geom.computeBoundingSphere();
+        }
+
+        if (colorsAttr && targetColors && colorsAttr.count * 3 === targetColors.length) {
+          for (let i = 0; i < colorsAttr.count; i++) {
+            const cr = colorsAttr.getX(i);
+            const cg = colorsAttr.getY(i);
+            const cb = colorsAttr.getZ(i);
+            const tr = targetColors[i * 3 + 0];
+            const tg = targetColors[i * 3 + 1];
+            const tb = targetColors[i * 3 + 2];
+
+            colorsAttr.setX(i, cr + (tr - cr) * alpha);
+            colorsAttr.setY(i, cg + (tg - cg) * alpha);
+            colorsAttr.setZ(i, cb + (tb - cb) * alpha);
+          }
+          colorsAttr.needsUpdate = true;
+        }
+      }
+
       renderer.render(scene, camera);
     };
     animate();
@@ -349,16 +393,14 @@ export default function SpacetimeVisualizer() {
       ? objects.map((o) => (o._id === selectedObject._id ? { ...o, mass: selectedObject.mass } : o))
       : objects;
 
-    // Reset to base plane
+    // Reset to base plane for X,Z reference (we don't directly set Y; we animate towards targets)
     const base = basePositionsRef.current;
     for (let i = 0; i < positions.count; i++) {
       positions.setX(i, base[i * 3 + 0]);
-      positions.setY(i, base[i * 3 + 1]);
       positions.setZ(i, base[i * 3 + 2]);
     }
 
     // Physics-inspired curvature using weak-field potential without far-field clamping.
-    // y_displacement ~ -K * sum_i( m_i * (1/max(r, r_s(i))) )
     const K = 0.4;     // curvature visualization scale
     const k_rs = 0.05; // visual "Schwarzschild radius" scale
 
@@ -381,7 +423,6 @@ export default function SpacetimeVisualizer() {
         const r_s = k_rs * mass; // avoid singularities
         const effectiveR = Math.max(r, r_s);
 
-        // No far-field reference subtraction; allow curvature to persist smoothly with distance
         disp += mass * (1 / effectiveR);
       }
 
@@ -391,6 +432,14 @@ export default function SpacetimeVisualizer() {
 
     const meanDisp = sumDisp / Math.max(1, positions.count);
 
+    // Create/ensure color attribute exists
+    if (!geometry.getAttribute("color")) {
+      const colors = new Float32Array(positions.count * 3);
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    }
+    const colors = geometry.getAttribute("color") as THREE.BufferAttribute;
+    const color = new THREE.Color();
+
     // Compute curvature magnitude range for heatmap normalization
     let maxAbs = 0;
     for (let i = 0; i < positions.count; i++) {
@@ -399,20 +448,22 @@ export default function SpacetimeVisualizer() {
     }
     const invMax = maxAbs > 1e-6 ? 1 / maxAbs : 0;
 
-    // Ensure color attribute exists
-    if (!geometry.getAttribute("color")) {
-      const colors = new Float32Array(positions.count * 3);
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    // Prepare/resize targets if needed
+    if (!targetYRef.current || targetYRef.current.length !== positions.count) {
+      targetYRef.current = new Float32Array(positions.count);
     }
-    const colors = geometry.getAttribute("color") as THREE.BufferAttribute;
-    const color = new THREE.Color();
+    if (!targetColorsRef.current || targetColorsRef.current.length !== positions.count * 3) {
+      targetColorsRef.current = new Float32Array(positions.count * 3);
+    }
+    const targetY = targetYRef.current;
+    const targetColors = targetColorsRef.current;
 
-    // Second pass: apply zero-centered displacement and color
+    // Set target values (the animate loop will smoothly lerp to these)
     for (let i = 0; i < positions.count; i++) {
-      const baseY = positions.getY(i);
+      const baseY = base[i * 3 + 1];
       const centered = disps[i] - meanDisp;
       const newY = baseY - K * centered;
-      positions.setY(i, newY);
+      targetY[i] = newY;
 
       // Heatmap: map |curvature| to 0..1, then to a perceptual ramp (blue->cyan->yellow->red)
       const t = Math.min(Math.max(Math.abs(centered) * invMax, 0), 1);
@@ -420,13 +471,14 @@ export default function SpacetimeVisualizer() {
       const sat = 0.85;
       const lum = 0.55 - 0.1 * t;
       color.setHSL(hue, sat, lum);
-      colors.setX(i, color.r);
-      colors.setY(i, color.g);
-      colors.setZ(i, color.b);
+      targetColors[i * 3 + 0] = color.r;
+      targetColors[i * 3 + 1] = color.g;
+      targetColors[i * 3 + 2] = color.b;
     }
 
-    positions.needsUpdate = true;
+    // Ensure a first small nudge if geometry has no colors (so visuals show immediately)
     colors.needsUpdate = true;
+    positions.needsUpdate = true;
     geometry.computeBoundingSphere();
   }, [objects, selectedObject?._id, selectedObject?.mass]);
 
