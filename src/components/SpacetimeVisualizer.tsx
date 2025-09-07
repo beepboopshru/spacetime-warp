@@ -111,8 +111,12 @@ export default function SpacetimeVisualizer() {
         opacity: 0.35,
         side: THREE.DoubleSide,
       });
+      // Prevent the heatmap surface from occluding objects
+      heatmapMaterial.depthWrite = false;
+
       const heatmapMesh = new THREE.Mesh(geom, heatmapMaterial);
-      heatmapMesh.renderOrder = 0; // draw beneath the wireframe lines
+      // Draw beneath other meshes
+      heatmapMesh.renderOrder = -1;
       heatmapRef.current = heatmapMesh;
       scene.add(heatmapMesh);
     }
@@ -274,19 +278,53 @@ export default function SpacetimeVisualizer() {
       if (!objectType) return;
 
       const geometry = new THREE.SphereGeometry(objectType.size, 32, 32);
-      const material = new THREE.MeshPhongMaterial({ 
-        color: objectType.color,
-        emissive: obj.type === 'blackhole' ? 0x000000 : objectType.color,
-        emissiveIntensity: obj.type === 'blackhole' ? 0 : 0.1
-      });
-      
+
+      // Improve black hole visibility and affordance
+      const isBlackHole = obj.type === "blackhole";
+      const material = isBlackHole
+        ? new THREE.MeshStandardMaterial({
+            color: 0x000000,
+            emissive: 0x222222,
+            emissiveIntensity: 0.25,
+            metalness: 0.85,
+            roughness: 0.2,
+          })
+        : new THREE.MeshPhongMaterial({
+            color: objectType.color,
+            emissive: objectType.color,
+            emissiveIntensity: 0.1,
+          });
+
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(obj.position.x, obj.position.y, obj.position.z);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      
+
       sceneRef.current?.add(mesh);
       objectsRef.current.set(obj._id, mesh);
+
+      // Add a subtle accretion disk for black holes for better visibility
+      if (isBlackHole) {
+        const diskGeom = new THREE.TorusGeometry(objectType.size * 1.6, objectType.size * 0.15, 12, 64);
+        const diskMat = new THREE.MeshStandardMaterial({
+          color: 0xffaa55,
+          emissive: 0xff6600,
+          emissiveIntensity: 0.35,
+          metalness: 0.5,
+          roughness: 0.4,
+          transparent: true,
+          opacity: 0.85,
+        });
+        const disk = new THREE.Mesh(diskGeom, diskMat);
+        disk.rotation.x = Math.PI / 2;
+        disk.position.copy(mesh.position);
+        disk.castShadow = false;
+        disk.receiveShadow = false;
+
+        sceneRef.current?.add(disk);
+        // Track the disk with the same key variant to remove on refresh; suffix to avoid overwrite
+        objectsRef.current.set(`${obj._id}:disk`, disk);
+      }
     });
 
     // Update grid curvature based on objects
