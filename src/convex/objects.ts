@@ -103,8 +103,12 @@ export const deleteObject = mutation({
     }
 
     const object = await ctx.db.get(args.objectId);
-    if (!object || object.userId !== user._id) {
-      throw new Error("Object not found or unauthorized");
+    // Make deletion idempotent: if it's already gone, just return
+    if (!object) {
+      return;
+    }
+    if (object.userId !== user._id) {
+      throw new Error("Unauthorized");
     }
 
     await ctx.db.delete(args.objectId);
