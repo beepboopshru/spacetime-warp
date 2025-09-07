@@ -147,8 +147,8 @@ export default function SpacetimeVisualizer() {
       const orbitSpeed = 0.005;
       const panSpeed = 0.002 * sphericalRef.current.radius;
 
-      // Shift-drag or right-click drag -> pan
-      if (event.shiftKey || dragButton === 2) {
+      // Shift-drag -> pan (with any mouse button)
+      if (event.shiftKey) {
         const camera = cameraRef.current;
         const dir = new THREE.Vector3();
         camera.getWorldDirection(dir);
@@ -169,8 +169,8 @@ export default function SpacetimeVisualizer() {
         return;
       }
 
-      // Left-drag orbit (azimuth + elevation)
-      if (dragButton === 0) {
+      // Left-drag or Right-drag -> orbit (azimuth + elevation)
+      if (dragButton === 0 || dragButton === 2) {
         sphericalRef.current.theta -= deltaX * orbitSpeed;
         sphericalRef.current.phi -= deltaY * orbitSpeed;
         updateCameraFromSpherical();
@@ -545,7 +545,7 @@ export default function SpacetimeVisualizer() {
         {/* Controls Hint */}
         <div className="absolute bottom-8 left-8 bg-card/90 backdrop-blur-sm border border-border rounded-lg p-4">
           <p className="text-sm text-muted-foreground">
-            <strong>Controls:</strong> Click to place objects • Drag to rotate • Scroll to zoom
+            <strong>Controls:</strong> Left-drag rotate • Right-drag rotate • Shift+drag pan • Scroll to zoom
           </p>
         </div>
       </div>
