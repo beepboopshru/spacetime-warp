@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
@@ -473,12 +473,19 @@ export default function SpacetimeVisualizer() {
     }
   }, [selectedObjectType, createObject, objects.length]);
 
-  const handleMassChange = useCallback(
-    (value: number[]) => {
+  const handleMassInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
       if (!selectedObject) return;
 
-      // Optimistically update local selection for instant feedback
-      const next = { ...selectedObject, mass: value[0] };
+      const raw = e.target.value;
+      let nextVal = parseFloat(raw);
+      if (Number.isNaN(nextVal)) return;
+
+      // Clamp allowed range
+      nextVal = Math.min(50000, Math.max(0.1, nextVal));
+
+      // Optimistically update selection for instant feedback
+      const next = { ...selectedObject, mass: nextVal };
       setSelectedObject(next);
 
       // Recompute curvature immediately using the optimistic mass
@@ -490,7 +497,7 @@ export default function SpacetimeVisualizer() {
         try {
           await updateObjectMass({
             objectId: selectedObject._id,
-            mass: value[0],
+            mass: nextVal,
           });
         } catch (error) {
           toast.error("Failed to update mass");
@@ -599,14 +606,18 @@ export default function SpacetimeVisualizer() {
                   <p className="text-sm text-muted-foreground mb-2">
                     {selectedObject.name || selectedObject.type}
                   </p>
-                  <Slider
-                    value={[selectedObject.mass]}
-                    onValueChange={handleMassChange}
-                    min={0.1}
-                    max={50000}
-                    step={0.1}
-                    className="w-full"
-                  />
+                  <div className="flex items-center gap-3">
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.1"
+                      min={0.1}
+                      max={50000}
+                      value={Number.isFinite(selectedObject.mass) ? selectedObject.mass : ""}
+                      onChange={handleMassInputChange}
+                      className="w-full"
+                    />
+                  </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     {selectedObject.mass.toFixed(2)} solar masses
                   </p>
