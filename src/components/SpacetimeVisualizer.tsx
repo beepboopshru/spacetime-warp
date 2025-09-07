@@ -270,6 +270,13 @@ export default function SpacetimeVisualizer() {
     updateGridCurvature();
   }, [objects]);
 
+  // Keep selected object in sync with realtime query updates
+  useEffect(() => {
+    if (!selectedObject) return;
+    const updated = objects.find((o) => o._id === selectedObject._id);
+    if (updated) setSelectedObject(updated);
+  }, [objects, selectedObject?._id]);
+
   const updateGridCurvature = useCallback(() => {
     if (!gridRef.current || !basePositionsRef.current) return;
 
@@ -332,6 +339,9 @@ export default function SpacetimeVisualizer() {
     geometry.computeBoundingSphere();
   }, [objects]);
 
+  // Debounce timer for mass updates
+  const massUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const handleCanvasClick = useCallback(async (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current || !cameraRef.current) return;
 
@@ -369,18 +379,28 @@ export default function SpacetimeVisualizer() {
     }
   }, [selectedObjectType, createObject, objects.length]);
 
-  const handleMassChange = useCallback(async (value: number[]) => {
-    if (!selectedObject) return;
-    
-    try {
-      await updateObjectMass({
-        objectId: selectedObject._id,
-        mass: value[0],
-      });
-    } catch (error) {
-      toast.error("Failed to update mass");
-    }
-  }, [selectedObject, updateObjectMass]);
+  const handleMassChange = useCallback(
+    (value: number[]) => {
+      if (!selectedObject) return;
+
+      // Optimistically update local selection for instant feedback
+      setSelectedObject({ ...selectedObject, mass: value[0] });
+
+      // Debounce server mutation
+      if (massUpdateTimerRef.current) clearTimeout(massUpdateTimerRef.current);
+      massUpdateTimerRef.current = setTimeout(async () => {
+        try {
+          await updateObjectMass({
+            objectId: selectedObject._id,
+            mass: value[0],
+          });
+        } catch (error) {
+          toast.error("Failed to update mass");
+        }
+      }, 120);
+    },
+    [selectedObject, updateObjectMass],
+  );
 
   const handleClearAll = useCallback(async () => {
     try {
