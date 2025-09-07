@@ -357,11 +357,10 @@ export default function SpacetimeVisualizer() {
       positions.setZ(i, base[i * 3 + 2]);
     }
 
-    // Physics-inspired curvature using weak-field potential relative to a far-field reference.
-    // y_displacement ~ -K * sum_i( m_i * (1/max(r, r_s(i)) - 1/R_far(i)) )
+    // Physics-inspired curvature using weak-field potential without far-field clamping.
+    // y_displacement ~ -K * sum_i( m_i * (1/max(r, r_s(i))) )
     const K = 0.4;     // curvature visualization scale
     const k_rs = 0.05; // visual "Schwarzschild radius" scale
-    const R_far_base = Math.max(2, gridExtentRef.current * 1.8); // reference distance near grid edge
 
     // First pass: compute displacements and accumulate mean to zero-center the sheet
     const disps = new Float32Array(positions.count);
@@ -382,9 +381,8 @@ export default function SpacetimeVisualizer() {
         const r_s = k_rs * mass; // avoid singularities
         const effectiveR = Math.max(r, r_s);
 
-        // Reference potential subtraction keeps far-field at ~0
-        const R_far = Math.max(R_far_base, r_s);
-        disp += mass * (1 / effectiveR - 1 / R_far);
+        // No far-field reference subtraction; allow curvature to persist smoothly with distance
+        disp += mass * (1 / effectiveR);
       }
 
       disps[i] = disp;
@@ -418,7 +416,6 @@ export default function SpacetimeVisualizer() {
 
       // Heatmap: map |curvature| to 0..1, then to a perceptual ramp (blue->cyan->yellow->red)
       const t = Math.min(Math.max(Math.abs(centered) * invMax, 0), 1);
-      // Use a hue ramp from 220deg (blue) to 10deg (red)
       const hue = (220 - 210 * t) / 360;
       const sat = 0.85;
       const lum = 0.55 - 0.1 * t;
