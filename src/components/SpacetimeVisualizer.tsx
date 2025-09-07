@@ -40,6 +40,8 @@ export default function SpacetimeVisualizer() {
   const [showGeodesics, setShowGeodesics] = useState(false);
   const [showEducational, setShowEducational] = useState(false);
   const [selectedObject, setSelectedObject] = useState<SpaceObject | null>(null);
+  const targetRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0)); // orbit target
+  const sphericalRef = useRef<THREE.Spherical>(new THREE.Spherical(15, Math.PI / 3, 0)); // radius, phi, theta
 
   const objects = useQuery(api.objects.getUserObjects) || [];
   const createObject = useMutation(api.objects.createObject);
@@ -59,8 +61,12 @@ export default function SpacetimeVisualizer() {
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 10, 10);
-    camera.lookAt(0, 0, 0);
+    // Position from spherical
+    {
+      const pos = new THREE.Vector3().setFromSpherical(sphericalRef.current).add(targetRef.current);
+      camera.position.copy(pos);
+      camera.lookAt(targetRef.current);
+    }
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true });
@@ -105,46 +111,108 @@ export default function SpacetimeVisualizer() {
     // Mouse controls
     let isDragging = false;
     let previousMousePosition = { x: 0, y: 0 };
+    let dragButton: number | null = null;
+
+    const updateCameraFromSpherical = () => {
+      if (!cameraRef.current) return;
+      const spherical = sphericalRef.current;
+      // Clamp phi to avoid flipping through poles
+      const minPhi = 0.05;
+      const maxPhi = Math.PI - 0.05;
+      spherical.phi = Math.min(Math.max(spherical.phi, minPhi), maxPhi);
+
+      const newPos = new THREE.Vector3().setFromSpherical(spherical).add(targetRef.current);
+      cameraRef.current.position.copy(newPos);
+      cameraRef.current.lookAt(targetRef.current);
+    };
 
     const handleMouseDown = (event: MouseEvent) => {
       isDragging = true;
+      dragButton = event.button;
       previousMousePosition = { x: event.clientX, y: event.clientY };
+      // Recompute spherical from current camera-target on interaction start
+      if (cameraRef.current) {
+        const offset = cameraRef.current.position.clone().sub(targetRef.current);
+        sphericalRef.current.setFromVector3(offset);
+      }
     };
 
     const handleMouseMove = (event: MouseEvent) => {
-      if (!isDragging) return;
+      if (!isDragging || !cameraRef.current) return;
 
-      const deltaMove = {
-        x: event.clientX - previousMousePosition.x,
-        y: event.clientY - previousMousePosition.y
-      };
-
-      const rotationSpeed = 0.005;
-      camera.position.x = camera.position.x * Math.cos(deltaMove.x * rotationSpeed) - camera.position.z * Math.sin(deltaMove.x * rotationSpeed);
-      camera.position.z = camera.position.x * Math.sin(deltaMove.x * rotationSpeed) + camera.position.z * Math.cos(deltaMove.x * rotationSpeed);
-      
-      camera.lookAt(0, 0, 0);
+      const deltaX = event.clientX - previousMousePosition.x;
+      const deltaY = event.clientY - previousMousePosition.y;
       previousMousePosition = { x: event.clientX, y: event.clientY };
+
+      const orbitSpeed = 0.005;
+      const panSpeed = 0.002 * sphericalRef.current.radius;
+
+      // Shift-drag or right-click drag -> pan
+      if (event.shiftKey || dragButton === 2) {
+        const camera = cameraRef.current;
+        const dir = new THREE.Vector3();
+        camera.getWorldDirection(dir);
+        const up = new THREE.Vector3(0, 1, 0);
+        const right = new THREE.Vector3().crossVectors(dir, up).normalize();
+        const actualUp = new THREE.Vector3().crossVectors(right, dir).normalize();
+
+        const pan = new THREE.Vector3()
+          .addScaledVector(right, -deltaX * panSpeed)
+          .addScaledVector(actualUp, deltaY * panSpeed);
+
+        targetRef.current.add(pan);
+        camera.position.add(pan);
+        // Keep spherical consistent with new camera-target
+        const offset = camera.position.clone().sub(targetRef.current);
+        sphericalRef.current.setFromVector3(offset);
+        camera.lookAt(targetRef.current);
+        return;
+      }
+
+      // Left-drag orbit (azimuth + elevation)
+      if (dragButton === 0) {
+        sphericalRef.current.theta -= deltaX * orbitSpeed;
+        sphericalRef.current.phi -= deltaY * orbitSpeed;
+        updateCameraFromSpherical();
+      }
     };
 
     const handleMouseUp = () => {
       isDragging = false;
+      dragButton = null;
     };
 
     const handleWheel = (event: WheelEvent) => {
-      const zoomSpeed = 0.1;
-      const distance = camera.position.distanceTo(new THREE.Vector3(0, 0, 0));
-      const newDistance = distance + (event.deltaY > 0 ? zoomSpeed : -zoomSpeed);
-      
-      if (newDistance > 2 && newDistance < 50) {
-        camera.position.multiplyScalar(newDistance / distance);
-      }
+      const zoomFactor = 1 + Math.sign(event.deltaY) * 0.1;
+      const spherical = sphericalRef.current;
+      spherical.radius *= zoomFactor;
+      spherical.radius = Math.min(Math.max(spherical.radius, 2), 80);
+      updateCameraFromSpherical();
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      // Prevent default context menu to allow right-click panning
+      e.preventDefault();
+    };
+
+    // Resize handling for better responsiveness
+    const handleResize = () => {
+      if (!rendererRef.current || !cameraRef.current || !canvasRef.current) return;
+      const parent = canvasRef.current.parentElement;
+      const width = parent ? parent.clientWidth : window.innerWidth * 0.7;
+      const height = parent ? parent.clientHeight : window.innerHeight * 0.8;
+      rendererRef.current.setSize(width, height);
+      cameraRef.current.aspect = width / height;
+      cameraRef.current.updateProjectionMatrix();
     };
 
     canvasRef.current.addEventListener('mousedown', handleMouseDown);
     canvasRef.current.addEventListener('mousemove', handleMouseMove);
     canvasRef.current.addEventListener('mouseup', handleMouseUp);
-    canvasRef.current.addEventListener('wheel', handleWheel);
+    canvasRef.current.addEventListener('wheel', handleWheel, { passive: true });
+    canvasRef.current.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('resize', handleResize);
+    handleResize();
 
     // Animation loop
     const animate = () => {
@@ -158,8 +226,10 @@ export default function SpacetimeVisualizer() {
         canvasRef.current.removeEventListener('mousedown', handleMouseDown);
         canvasRef.current.removeEventListener('mousemove', handleMouseMove);
         canvasRef.current.removeEventListener('mouseup', handleMouseUp);
-        canvasRef.current.removeEventListener('wheel', handleWheel);
+        canvasRef.current.removeEventListener('wheel', handleWheel as any);
+        canvasRef.current.removeEventListener('contextmenu', handleContextMenu);
       }
+      window.removeEventListener('resize', handleResize);
     };
   }, []);
 
