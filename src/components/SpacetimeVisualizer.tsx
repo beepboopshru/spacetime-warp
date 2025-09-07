@@ -35,6 +35,7 @@ export default function SpacetimeVisualizer() {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const gridRef = useRef<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> | null>(null);
+  const heatmapRef = useRef<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial> | null>(null);
   const objectsRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const [selectedObjectType, setSelectedObjectType] = useState<keyof typeof OBJECT_TYPES>("planet");
   const [showGeodesics, setShowGeodesics] = useState(false);
@@ -93,6 +94,28 @@ export default function SpacetimeVisualizer() {
     const gridMesh = new THREE.Mesh(planeGeom, gridMaterial);
     gridRef.current = gridMesh;
     scene.add(gridMesh);
+
+    // Add a semi-transparent colored surface using the same geometry for curvature heatmap
+    {
+      // Ensure the geometry has a color attribute
+      const geom = planeGeom;
+      const vertexCount = (geom.attributes.position as THREE.BufferAttribute).count;
+      if (!geom.getAttribute("color")) {
+        const colors = new Float32Array(vertexCount * 3);
+        geom.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      }
+
+      const heatmapMaterial = new THREE.MeshLambertMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.35,
+        side: THREE.DoubleSide,
+      });
+      const heatmapMesh = new THREE.Mesh(geom, heatmapMaterial);
+      heatmapMesh.renderOrder = 0; // draw beneath the wireframe lines
+      heatmapRef.current = heatmapMesh;
+      scene.add(heatmapMesh);
+    }
 
     // Cache base positions for curvature reset
     {
@@ -292,7 +315,6 @@ export default function SpacetimeVisualizer() {
     }
 
     // Physics-inspired curvature using weak-field potential relative to a far-field reference.
-    // This prevents a uniform offset so the sheet stays "static" at far distances.
     // y_displacement ~ -K * sum_i( m_i * (1/max(r, r_s(i)) - 1/R_far(i)) )
     const K = 0.4;     // curvature visualization scale
     const k_rs = 0.05; // visual "Schwarzschild radius" scale
@@ -328,14 +350,43 @@ export default function SpacetimeVisualizer() {
 
     const meanDisp = sumDisp / Math.max(1, positions.count);
 
-    // Second pass: apply zero-centered displacement
+    // Compute curvature magnitude range for heatmap normalization
+    let maxAbs = 0;
+    for (let i = 0; i < positions.count; i++) {
+      const centered = disps[i] - meanDisp;
+      if (Math.abs(centered) > maxAbs) maxAbs = Math.abs(centered);
+    }
+    const invMax = maxAbs > 1e-6 ? 1 / maxAbs : 0;
+
+    // Ensure color attribute exists
+    if (!geometry.getAttribute("color")) {
+      const colors = new Float32Array(positions.count * 3);
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    }
+    const colors = geometry.getAttribute("color") as THREE.BufferAttribute;
+    const color = new THREE.Color();
+
+    // Second pass: apply zero-centered displacement and color
     for (let i = 0; i < positions.count; i++) {
       const baseY = positions.getY(i);
-      const newY = baseY - K * (disps[i] - meanDisp);
+      const centered = disps[i] - meanDisp;
+      const newY = baseY - K * centered;
       positions.setY(i, newY);
+
+      // Heatmap: map |curvature| to 0..1, then to a perceptual ramp (blue->cyan->yellow->red)
+      const t = Math.min(Math.max(Math.abs(centered) * invMax, 0), 1);
+      // Use a hue ramp from 220deg (blue) to 10deg (red)
+      const hue = (220 - 210 * t) / 360;
+      const sat = 0.85;
+      const lum = 0.55 - 0.1 * t;
+      color.setHSL(hue, sat, lum);
+      colors.setX(i, color.r);
+      colors.setY(i, color.g);
+      colors.setZ(i, color.b);
     }
 
     positions.needsUpdate = true;
+    colors.needsUpdate = true;
     geometry.computeBoundingSphere();
   }, [objects]);
 
