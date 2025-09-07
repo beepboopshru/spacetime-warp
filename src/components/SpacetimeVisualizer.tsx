@@ -42,6 +42,7 @@ export default function SpacetimeVisualizer() {
   const [selectedObject, setSelectedObject] = useState<SpaceObject | null>(null);
   const targetRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0)); // orbit target
   const sphericalRef = useRef<THREE.Spherical>(new THREE.Spherical(15, Math.PI / 3, 0)); // radius, phi, theta
+  const gridExtentRef = useRef<number>(20); // track plane half-extent for reference potential
 
   const objects = useQuery(api.objects.getUserObjects) || [];
   const createObject = useMutation(api.objects.createObject);
@@ -81,6 +82,7 @@ export default function SpacetimeVisualizer() {
     const planeGeom = new THREE.PlaneGeometry(gridSize * 2, gridSize * 2, gridDivisions, gridDivisions);
     // Rotate into XZ plane so Y is "depth" for curvature
     planeGeom.rotateX(-Math.PI / 2);
+    gridExtentRef.current = gridSize; // remember extent for reference potential
 
     const gridMaterial = new THREE.MeshBasicMaterial({
       color: 0x444444,
@@ -282,11 +284,16 @@ export default function SpacetimeVisualizer() {
       positions.setZ(i, base[i * 3 + 2]);
     }
 
-    // Physics-inspired curvature using weak-field potential
-    // y_displacement ~ -K * sum_i( m_i / max(r, r_s(i)) )
-    // where r_s(i) ~ k_rs * m_i provides a visual event horizon scale to avoid singularities
-    const K = 0.4;       // curvature scale factor (visual)
-    const k_rs = 0.05;   // event horizon visual scale per solar mass
+    // Physics-inspired curvature using weak-field potential relative to a far-field reference.
+    // This prevents a uniform offset so the sheet stays "static" at far distances.
+    // y_displacement ~ -K * sum_i( m_i * (1/max(r, r_s(i)) - 1/R_far(i)) )
+    const K = 0.4;     // curvature visualization scale
+    const k_rs = 0.05; // visual "Schwarzschild radius" scale
+    const R_far_base = Math.max(2, gridExtentRef.current * 1.8); // reference distance near grid edge
+
+    // First pass: compute displacements and accumulate mean to zero-center the sheet
+    const disps = new Float32Array(positions.count);
+    let sumDisp = 0;
 
     for (let i = 0; i < positions.count; i++) {
       const x = positions.getX(i);
@@ -297,16 +304,27 @@ export default function SpacetimeVisualizer() {
       for (const obj of objects) {
         const dx = x - obj.position.x;
         const dz = z - obj.position.z;
-        const r = Math.sqrt(dx * dx + dz * dz);
+        const r = Math.hypot(dx, dz);
 
         const mass = Math.max(0.000001, obj.mass);
-        const r_s = k_rs * mass; // visual Schwarzschild radius
+        const r_s = k_rs * mass; // avoid singularities
         const effectiveR = Math.max(r, r_s);
 
-        disp += mass / effectiveR;
+        // Reference potential subtraction keeps far-field at ~0
+        const R_far = Math.max(R_far_base, r_s);
+        disp += mass * (1 / effectiveR - 1 / R_far);
       }
 
-      const newY = positions.getY(i) - K * disp;
+      disps[i] = disp;
+      sumDisp += disp;
+    }
+
+    const meanDisp = sumDisp / Math.max(1, positions.count);
+
+    // Second pass: apply zero-centered displacement
+    for (let i = 0; i < positions.count; i++) {
+      const baseY = positions.getY(i);
+      const newY = baseY - K * (disps[i] - meanDisp);
       positions.setY(i, newY);
     }
 
