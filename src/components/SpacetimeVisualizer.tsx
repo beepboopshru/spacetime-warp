@@ -53,7 +53,7 @@ export default function SpacetimeVisualizer() {
 
   // Store original plane positions to reset before recomputing curvature
   const basePositionsRef = useRef<Float32Array | null>(null);
-  // Targets for smooth animation of curvature (Y positions + colors)
+  // Targets for smooth animation of curvature (Y positions)
   const targetYRef = useRef<Float32Array | null>(null);
   const targetColorsRef = useRef<Float32Array | null>(null);
 
@@ -74,15 +74,16 @@ export default function SpacetimeVisualizer() {
     }
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true });
+    // Optimize renderer: cap pixel ratio and disable shadows
+    const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, powerPreference: "high-performance" as any });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setSize(window.innerWidth * 0.7, window.innerHeight * 0.8);
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.enabled = false;
     rendererRef.current = renderer;
 
     // Create spacetime grid (as a deformable plane wireframe)
     const gridSize = 20;
-    const gridDivisions = 100; // higher for smoother curvature
+    const gridDivisions = 64; // reduced for performance
     const planeGeom = new THREE.PlaneGeometry(gridSize * 2, gridSize * 2, gridDivisions, gridDivisions);
     // Rotate into XZ plane so Y is "depth" for curvature
     planeGeom.rotateX(-Math.PI / 2);
@@ -234,6 +235,7 @@ export default function SpacetimeVisualizer() {
       const width = parent ? parent.clientWidth : window.innerWidth * 0.7;
       const height = parent ? parent.clientHeight : window.innerHeight * 0.8;
       rendererRef.current.setSize(width, height);
+      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
       cameraRef.current.aspect = width / height;
       cameraRef.current.updateProjectionMatrix();
     };
@@ -250,15 +252,13 @@ export default function SpacetimeVisualizer() {
     const animate = () => {
       requestAnimationFrame(animate);
 
-      // Smoothly interpolate grid Y positions and vertex colors to targets
+      // Smoothly interpolate grid Y positions to targets
       const grid = gridRef.current;
       if (grid) {
         const geom = grid.geometry;
         const pos = geom.attributes.position as THREE.BufferAttribute;
-        const colorsAttr = geom.getAttribute("color") as THREE.BufferAttribute | undefined;
 
         const targetY = targetYRef.current;
-        const targetColors = targetColorsRef.current;
 
         // Interpolation factor (0..1), higher is faster
         const alpha = 0.12;
@@ -271,22 +271,6 @@ export default function SpacetimeVisualizer() {
           }
           pos.needsUpdate = true;
           geom.computeBoundingSphere();
-        }
-
-        if (colorsAttr && targetColors && colorsAttr.count * 3 === targetColors.length) {
-          for (let i = 0; i < colorsAttr.count; i++) {
-            const cr = colorsAttr.getX(i);
-            const cg = colorsAttr.getY(i);
-            const cb = colorsAttr.getZ(i);
-            const tr = targetColors[i * 3 + 0];
-            const tg = targetColors[i * 3 + 1];
-            const tb = targetColors[i * 3 + 2];
-
-            colorsAttr.setX(i, cr + (tr - cr) * alpha);
-            colorsAttr.setY(i, cg + (tg - cg) * alpha);
-            colorsAttr.setZ(i, cb + (tb - cb) * alpha);
-          }
-          colorsAttr.needsUpdate = true;
         }
       }
 
@@ -432,7 +416,7 @@ export default function SpacetimeVisualizer() {
 
     const meanDisp = sumDisp / Math.max(1, positions.count);
 
-    // Create/ensure color attribute exists
+    // Ensure color attribute exists
     if (!geometry.getAttribute("color")) {
       const colors = new Float32Array(positions.count * 3);
       geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
@@ -448,35 +432,31 @@ export default function SpacetimeVisualizer() {
     }
     const invMax = maxAbs > 1e-6 ? 1 / maxAbs : 0;
 
-    // Prepare/resize targets if needed
+    // Prepare/resize Y targets if needed
     if (!targetYRef.current || targetYRef.current.length !== positions.count) {
       targetYRef.current = new Float32Array(positions.count);
     }
-    if (!targetColorsRef.current || targetColorsRef.current.length !== positions.count * 3) {
-      targetColorsRef.current = new Float32Array(positions.count * 3);
-    }
     const targetY = targetYRef.current;
-    const targetColors = targetColorsRef.current;
 
-    // Set target values (the animate loop will smoothly lerp to these)
+    // Set target positions and update colors immediately (no per-frame color lerp for performance)
     for (let i = 0; i < positions.count; i++) {
       const baseY = base[i * 3 + 1];
       const centered = disps[i] - meanDisp;
       const newY = baseY - K * centered;
       targetY[i] = newY;
 
-      // Heatmap: map |curvature| to 0..1, then to a perceptual ramp (blue->cyan->yellow->red)
+      // Heatmap color (blue->cyan->yellow->red)
       const t = Math.min(Math.max(Math.abs(centered) * invMax, 0), 1);
       const hue = (220 - 210 * t) / 360;
       const sat = 0.85;
       const lum = 0.55 - 0.1 * t;
       color.setHSL(hue, sat, lum);
-      targetColors[i * 3 + 0] = color.r;
-      targetColors[i * 3 + 1] = color.g;
-      targetColors[i * 3 + 2] = color.b;
+      colors.setX(i, color.r);
+      colors.setY(i, color.g);
+      colors.setZ(i, color.b);
     }
 
-    // Ensure a first small nudge if geometry has no colors (so visuals show immediately)
+    // Ensure updates are applied
     colors.needsUpdate = true;
     positions.needsUpdate = true;
     geometry.computeBoundingSphere();
