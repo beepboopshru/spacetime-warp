@@ -34,7 +34,7 @@ export default function SpacetimeVisualizer() {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const gridRef = useRef<THREE.Group | null>(null);
+  const gridRef = useRef<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> | null>(null);
   const objectsRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const [selectedObjectType, setSelectedObjectType] = useState<keyof typeof OBJECT_TYPES>("planet");
   const [showGeodesics, setShowGeodesics] = useState(false);
@@ -46,6 +46,9 @@ export default function SpacetimeVisualizer() {
   const updateObjectMass = useMutation(api.objects.updateObjectMass);
   const deleteObject = useMutation(api.objects.deleteObject);
   const clearAllObjects = useMutation(api.objects.clearAllObjects);
+
+  // Store original plane positions to reset before recomputing curvature
+  const basePositionsRef = useRef<Float32Array | null>(null);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -66,31 +69,28 @@ export default function SpacetimeVisualizer() {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     rendererRef.current = renderer;
 
-    // Create spacetime grid
-    const gridGroup = new THREE.Group();
+    // Create spacetime grid (as a deformable plane wireframe)
     const gridSize = 20;
-    const gridDivisions = 40;
-    
-    // Create grid lines
-    for (let i = -gridSize; i <= gridSize; i += gridSize / (gridDivisions / 2)) {
-      const geometry = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-gridSize, 0, i),
-        new THREE.Vector3(gridSize, 0, i)
-      ]);
-      const material = new THREE.LineBasicMaterial({ color: 0x333333, transparent: true, opacity: 0.3 });
-      const line = new THREE.Line(geometry, material);
-      gridGroup.add(line);
+    const gridDivisions = 100; // higher for smoother curvature
+    const planeGeom = new THREE.PlaneGeometry(gridSize * 2, gridSize * 2, gridDivisions, gridDivisions);
+    // Rotate into XZ plane so Y is "depth" for curvature
+    planeGeom.rotateX(-Math.PI / 2);
 
-      const geometry2 = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(i, 0, -gridSize),
-        new THREE.Vector3(i, 0, gridSize)
-      ]);
-      const line2 = new THREE.Line(geometry2, material);
-      gridGroup.add(line2);
+    const gridMaterial = new THREE.MeshBasicMaterial({
+      color: 0x444444,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.6,
+    });
+    const gridMesh = new THREE.Mesh(planeGeom, gridMaterial);
+    gridRef.current = gridMesh;
+    scene.add(gridMesh);
+
+    // Cache base positions for curvature reset
+    {
+      const posAttr = planeGeom.attributes.position as THREE.BufferAttribute;
+      basePositionsRef.current = new Float32Array(posAttr.array as ArrayLike<number>);
     }
-
-    gridRef.current = gridGroup;
-    scene.add(gridGroup);
 
     // Add ambient light
     const ambientLight = new THREE.AmbientLight(0x404040, 0.4);
@@ -199,47 +199,49 @@ export default function SpacetimeVisualizer() {
   }, [objects]);
 
   const updateGridCurvature = useCallback(() => {
-    if (!gridRef.current) return;
+    if (!gridRef.current || !basePositionsRef.current) return;
 
-    // Reset grid to flat
-    gridRef.current.children.forEach((child) => {
-      if (child instanceof THREE.Line) {
-        const positions = child.geometry.attributes.position;
-        for (let i = 0; i < positions.count; i++) {
-          positions.setY(i, 0);
-        }
-        positions.needsUpdate = true;
+    const geometry = gridRef.current.geometry;
+    const positions = geometry.attributes.position as THREE.BufferAttribute;
+
+    // Reset to base plane
+    const base = basePositionsRef.current;
+    for (let i = 0; i < positions.count; i++) {
+      positions.setX(i, base[i * 3 + 0]);
+      positions.setY(i, base[i * 3 + 1]);
+      positions.setZ(i, base[i * 3 + 2]);
+    }
+
+    // Physics-inspired curvature using weak-field potential
+    // y_displacement ~ -K * sum_i( m_i / max(r, r_s(i)) )
+    // where r_s(i) ~ k_rs * m_i provides a visual event horizon scale to avoid singularities
+    const K = 0.4;       // curvature scale factor (visual)
+    const k_rs = 0.05;   // event horizon visual scale per solar mass
+
+    for (let i = 0; i < positions.count; i++) {
+      const x = positions.getX(i);
+      const z = positions.getZ(i);
+
+      let disp = 0;
+
+      for (const obj of objects) {
+        const dx = x - obj.position.x;
+        const dz = z - obj.position.z;
+        const r = Math.sqrt(dx * dx + dz * dz);
+
+        const mass = Math.max(0.000001, obj.mass);
+        const r_s = k_rs * mass; // visual Schwarzschild radius
+        const effectiveR = Math.max(r, r_s);
+
+        disp += mass / effectiveR;
       }
-    });
 
-    // Apply curvature from each object
-    objects.forEach((obj) => {
-      const objectType = OBJECT_TYPES[obj.type as keyof typeof OBJECT_TYPES];
-      if (!objectType) return;
+      const newY = positions.getY(i) - K * disp;
+      positions.setY(i, newY);
+    }
 
-      const massEffect = Math.log(obj.mass + 1) * 0.5;
-      
-      gridRef.current?.children.forEach((child) => {
-        if (child instanceof THREE.Line) {
-          const positions = child.geometry.attributes.position;
-          
-          for (let i = 0; i < positions.count; i++) {
-            const x = positions.getX(i);
-            const z = positions.getZ(i);
-            const distance = Math.sqrt(
-              Math.pow(x - obj.position.x, 2) + Math.pow(z - obj.position.z, 2)
-            );
-            
-            if (distance < 10) {
-              const curvature = massEffect / (distance + 0.5);
-              const currentY = positions.getY(i);
-              positions.setY(i, currentY - curvature);
-            }
-          }
-          positions.needsUpdate = true;
-        }
-      });
-    });
+    positions.needsUpdate = true;
+    geometry.computeBoundingSphere();
   }, [objects]);
 
   const handleCanvasClick = useCallback(async (event: React.MouseEvent<HTMLCanvasElement>) => {
