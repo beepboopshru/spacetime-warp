@@ -344,6 +344,11 @@ export default function SpacetimeVisualizer() {
     const geometry = gridRef.current.geometry;
     const positions = geometry.attributes.position as THREE.BufferAttribute;
 
+    // Use the selected object's latest mass optimistically for curvature calculations
+    const effectiveObjects = selectedObject
+      ? objects.map((o) => (o._id === selectedObject._id ? { ...o, mass: selectedObject.mass } : o))
+      : objects;
+
     // Reset to base plane
     const base = basePositionsRef.current;
     for (let i = 0; i < positions.count; i++) {
@@ -368,7 +373,7 @@ export default function SpacetimeVisualizer() {
 
       let disp = 0;
 
-      for (const obj of objects) {
+      for (const obj of effectiveObjects) {
         const dx = x - obj.position.x;
         const dz = z - obj.position.z;
         const r = Math.hypot(dx, dz);
@@ -426,7 +431,7 @@ export default function SpacetimeVisualizer() {
     positions.needsUpdate = true;
     colors.needsUpdate = true;
     geometry.computeBoundingSphere();
-  }, [objects]);
+  }, [objects, selectedObject?._id, selectedObject?.mass]);
 
   // Debounce timer for mass updates
   const massUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -473,7 +478,11 @@ export default function SpacetimeVisualizer() {
       if (!selectedObject) return;
 
       // Optimistically update local selection for instant feedback
-      setSelectedObject({ ...selectedObject, mass: value[0] });
+      const next = { ...selectedObject, mass: value[0] };
+      setSelectedObject(next);
+
+      // Recompute curvature immediately using the optimistic mass
+      updateGridCurvature();
 
       // Debounce server mutation
       if (massUpdateTimerRef.current) clearTimeout(massUpdateTimerRef.current);
@@ -488,7 +497,7 @@ export default function SpacetimeVisualizer() {
         }
       }, 120);
     },
-    [selectedObject, updateObjectMass],
+    [selectedObject, updateObjectMass, updateGridCurvature],
   );
 
   const handleClearAll = useCallback(async () => {
