@@ -32,12 +32,18 @@ const schema = defineSchema(
       role: v.optional(roleValidator), // role of the user. do not remove
     }).index("email", ["email"]), // index for the email. do not remove or modify
 
-    // add other tables here
-
-    // tableName: defineTable({
-    //   ...
-    //   // table fields
-    // }).index("by_field", ["field"])
+    // Space objects for the spacetime visualizer
+    spaceObjects: defineTable({
+      userId: v.id("users"),
+      type: v.string(), // "planet", "star", "blackhole", "neutronstar", "spaceship"
+      mass: v.number(), // mass in solar masses
+      position: v.object({
+        x: v.number(),
+        y: v.number(),
+        z: v.number(),
+      }),
+      name: v.optional(v.string()),
+    }).index("by_user", ["userId"]),
   },
   {
     schemaValidation: false,
